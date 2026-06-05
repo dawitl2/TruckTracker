@@ -18,17 +18,9 @@ function supabaseHeaders(extra = {}) {
 
 async function readJsonResponse(response) {
   const contentType = response.headers.get("content-type") || "";
-
-  if (contentType.includes("application/json")) {
-    return response.json();
-  }
-
+  if (contentType.includes("application/json")) return response.json();
   const text = await response.text();
-
-  if (text.includes("<!DOCTYPE")) {
-    throw new Error("A server returned HTML instead of JSON. Check the request URL.");
-  }
-
+  if (text.includes("<!DOCTYPE")) throw new Error("A server returned HTML instead of JSON. Check the request URL.");
   throw new Error(text || "Unexpected non-JSON response from the server.");
 }
 
@@ -82,25 +74,17 @@ function parseRows(matrix, extractionDate, extractionTime) {
 
   const targetRows = TARGET_LICENSE_PLATES.flatMap((plate) => {
     const targetPlate = normalizePlate(plate);
-
     return rows
       .filter((row) => normalizePlate(row.license_plate) === targetPlate)
-      .map((row) => ({
-        ...row,
-        target_plate: targetPlate
-      }));
+      .map((row) => ({ ...row, target_plate: targetPlate }));
   });
 
-  return {
-    rows,
-    targetRows
-  };
+  return { rows, targetRows };
 }
 
 function readWorkbook(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-
     reader.onload = (event) => {
       try {
         const workbook = XLSX.read(event.target.result, { type: "binary" });
@@ -109,7 +93,6 @@ function readWorkbook(file) {
         reject(error);
       }
     };
-
     reader.onerror = () => reject(new Error("Could not read the file."));
     reader.readAsBinaryString(file);
   });
@@ -118,25 +101,13 @@ function readWorkbook(file) {
 async function parseBatchFile(file) {
   const workbook = await readWorkbook(file);
   const sheetName = workbook.SheetNames[0];
-
-  if (!sheetName) {
-    throw new Error("The workbook does not contain any sheets.");
-  }
-
+  if (!sheetName) throw new Error("The workbook does not contain any sheets.");
   const sheet = workbook.Sheets[sheetName];
   const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-
-  if (!matrix.length) {
-    throw new Error("No data rows were found in the file.");
-  }
-
+  if (!matrix.length) throw new Error("No data rows were found in the file.");
   const now = new Date();
   const parsed = parseRows(matrix, formatExtractionDate(now), formatExtractionTime(now));
-
-  if (!parsed.rows.length) {
-    throw new Error("No arrival rows were found in the file.");
-  }
-
+  if (!parsed.rows.length) throw new Error("No arrival rows were found in the file.");
   return parsed;
 }
 
@@ -160,76 +131,50 @@ function App() {
 
   const loadSavedRows = async () => {
     let response;
-
     try {
       response = await fetch(
         `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=id,arrival_date,batch_time,license_plate,arrival_code,product_type,company,created_at&order=created_at.desc&limit=50`,
-        {
-          headers: supabaseHeaders()
-        }
+        { headers: supabaseHeaders() }
       );
     } catch {
       throw new Error("Could not reach Supabase.");
     }
-
     const data = await readJsonResponse(response);
-
-    if (!response.ok) {
-      throw new Error(data.error?.message || data.message || "Failed to load saved rows");
-    }
-
+    if (!response.ok) throw new Error(data.error?.message || data.message || "Failed to load saved rows");
     setSavedRows(data || []);
   };
 
   useEffect(() => {
-    loadSavedRows().catch((loadError) => {
-      setError(loadError.message);
-    });
+    loadSavedRows().catch((loadError) => setError(loadError.message));
   }, []);
 
   useEffect(() => {
-    const updateViewport = () => {
-      setIsMobile(window.innerWidth <= 720);
-    };
-
-    const updateScroll = () => {
-      setShowTopButton(window.scrollY > 280);
-    };
-
+    const updateViewport = () => setIsMobile(window.innerWidth <= 720);
+    const updateScroll = () => setShowTopButton(window.scrollY > 280);
     updateViewport();
     updateScroll();
-
     window.addEventListener("resize", updateViewport);
     window.addEventListener("scroll", updateScroll, { passive: true });
-
     return () => {
       window.removeEventListener("resize", updateViewport);
       window.removeEventListener("scroll", updateScroll);
     };
   }, []);
 
-  const openFilePicker = () => {
-    fileInputRef.current?.click();
-  };
+  const openFilePicker = () => fileInputRef.current?.click();
 
   const handlePrimaryAction = () => {
     if (isMobile) {
       setMobileSheetOpen((current) => !current);
       return;
     }
-
     openFilePicker();
   };
 
-  const closeMobileSheet = () => {
-    setMobileSheetOpen(false);
-  };
+  const closeMobileSheet = () => setMobileSheetOpen(false);
 
   const handleFileSelected = async (nextFile) => {
-    if (!nextFile) {
-      return;
-    }
-
+    if (!nextFile) return;
     setFile(nextFile);
     setLoading(true);
     setSaving(false);
@@ -238,18 +183,14 @@ function App() {
     setSelectedPlate(TARGET_LICENSE_PLATES[0]);
     setTargetRows([]);
     setSaveComplete(false);
-
     try {
       const parsed = await parseBatchFile(nextFile);
       setTargetRows(parsed.targetRows);
       setSelectedPlate(parsed.targetRows[0]?.license_plate || TARGET_LICENSE_PLATES[0]);
-
       if (!parsed.targetRows.length) {
-        setError(`No target plates were found in the file.`);
+        setError("No target plates were found in the file.");
       } else {
-        setNotice(
-          `Found ${parsed.targetRows.length} target plate${parsed.targetRows.length === 1 ? "" : "s"}.`
-        );
+        setNotice(`Found ${parsed.targetRows.length} target plate${parsed.targetRows.length === 1 ? "" : "s"}.`);
       }
     } catch (importError) {
       setError(importError.message);
@@ -259,14 +200,10 @@ function App() {
   };
 
   const handleSave = async () => {
-    if (!targetRows.length) {
-      return;
-    }
-
+    if (!targetRows.length) return;
     setSaving(true);
     clearNotice();
     clearError();
-
     try {
       const payload = targetRows.map((row) => ({
         arrival_date: toDbValue(row.arrival_date),
@@ -276,9 +213,7 @@ function App() {
         product_type: toDbValue(row.product_type),
         company: toDbValue(row.company)
       }));
-
       let response;
-
       try {
         response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`, {
           method: "POST",
@@ -291,21 +226,13 @@ function App() {
       } catch {
         throw new Error("Could not reach Supabase.");
       }
-
       const data = await readJsonResponse(response);
-
-      if (!response.ok) {
-        throw new Error(data.error?.message || data.message || "Save failed");
-      }
-
+      if (!response.ok) throw new Error(data.error?.message || data.message || "Save failed");
       const nextSelectedPlate = normalizePlate(payload[0]?.license_plate || selectedPlate);
-
       setSelectedPlate(nextSelectedPlate);
       setTargetRows([]);
       setSaveComplete(true);
-      setNotice(
-        `Saved ${payload.length} target plate${payload.length === 1 ? "" : "s"}.`
-      );
+      setNotice(`Saved ${payload.length} target plate${payload.length === 1 ? "" : "s"}.`);
       await loadSavedRows();
     } catch (saveError) {
       setError(saveError.message);
@@ -315,8 +242,12 @@ function App() {
   };
 
   const visibleRows = savedRows.filter((row) => TARGET_LICENSE_PLATE_SET.has(normalizePlate(row.license_plate)));
-  const plateRows = visibleRows.filter((row) => normalizePlate(row.license_plate) === selectedPlate);
+  const plateRows = visibleRows.filter((row) => normalizePlate(row.license_plate) === normalizePlate(selectedPlate));
   const selectedPlateLabel = formatPlateLabel(selectedPlate);
+
+  // desktop scan result state: null = idle, 'found' | 'not_found'
+  const scanState = !file ? null : loading ? "loading" : targetRows.length && !saveComplete ? "found" : saveComplete ? "saved" : file ? "not_found" : null;
+
   const mobileStatus = loading
     ? "loading"
     : saveComplete
@@ -328,35 +259,54 @@ function App() {
           : "idle";
 
   return (
-    <div
-      className="page"
-      onPointerDown={(event) => {
-        if (
-          error &&
-          event.target instanceof Element &&
-          !event.target.closest(".message-banner")
-        ) {
-          clearError();
-        }
-      }}
-    >
+    <div className="page">
       <div className="shell">
-        <header className="topbar">
-          <div className="brand">
-            <img className="brand-logo" src="/logo.png" alt="Truck Tracker logo" />
-            <div className="title-block">
-              <h1>Truck Tracker</h1>
-              <p>
-                Upload a file, match the target plates, and save only the rows found to Supabase.
-              </p>
-            </div>
-          </div>
 
-          <span className="pill">
-            {file ? file.name : "Tap + to choose a file"}
-          </span>
+        {/* ── Header: logo only, centered ── */}
+        <header className="topbar">
+          <img className="brand-logo" src="/logo.png" alt="Truck Tracker logo" />
         </header>
 
+        {/* ── Scan result banner (desktop) ── */}
+        {scanState === "found" ? (
+          <div className="scan-result found" role="status" aria-live="polite">
+            <div className="scan-icon">✓</div>
+            <div className="scan-body">
+              <strong>{targetRows.length} match{targetRows.length === 1 ? "" : "es"} found</strong>
+              <span>
+                {targetRows.map((row) =>
+                  `${formatPlateLabel(row.license_plate)} · ${normalizeValue(row.arrival_code)} · ${normalizeValue(row.arrival_date)} · ${normalizeValue(row.batch_time)}`
+                ).join("   ")}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="scan-save-btn"
+              onClick={handleSave}
+              disabled={saving}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        ) : scanState === "not_found" ? (
+          <div className="scan-result not-found" role="alert">
+            <div className="scan-icon not-found-x">✕</div>
+            <div className="scan-body">
+              <strong>No matches found</strong>
+              <span>The target plates were not present in this file.</span>
+            </div>
+          </div>
+        ) : scanState === "saved" ? (
+          <div className="scan-result saved" role="status">
+            <div className="scan-icon">✓</div>
+            <div className="scan-body">
+              <strong>Saved successfully</strong>
+              <span>{notice}</span>
+            </div>
+          </div>
+        ) : null}
+
+        {/* ── Main card ── */}
         <section className="card table-shell">
           <div className="card-head">
             <div>
@@ -372,20 +322,10 @@ function App() {
             </button>
           </div>
 
-          {notice ? (
-            <div className="message-banner success" role="status" aria-live="polite">
-              <span>{notice}</span>
-              <button type="button" className="banner-close" onClick={clearNotice} aria-label="Dismiss message">
-                x
-              </button>
-            </div>
-          ) : null}
           {error ? (
             <div className="message-banner error" role="alert" aria-live="assertive">
               <span>{error}</span>
-              <button type="button" className="banner-close" onClick={clearError} aria-label="Dismiss error">
-                x
-              </button>
+              <button type="button" className="banner-close" onClick={clearError} aria-label="Dismiss error">✕</button>
             </div>
           ) : null}
 
@@ -400,41 +340,18 @@ function App() {
                 onClick={() => setSelectedPlate(plate)}
               >
                 <span>{formatPlateLabel(plate)}</span>
-                <small>{visibleRows.filter((row) => normalizePlate(row.license_plate) === normalizePlate(plate)).length} saved</small>
+                <small>
+                  {visibleRows.filter((row) => normalizePlate(row.license_plate) === normalizePlate(plate)).length} saved
+                </small>
               </button>
             ))}
           </div>
-
-          {!saveComplete && targetRows.length ? (
-            <div className="target-strip">
-              <div className="target-copy">
-                <strong>{targetRows.length === 1 ? "Target row found" : "Target rows found"}</strong>
-                <span>
-                  {targetRows
-                    .map(
-                      (row) =>
-                        `${formatPlateLabel(row.license_plate)} | ${normalizeValue(row.arrival_code)} | ${normalizeValue(row.arrival_date)} | ${normalizeValue(row.batch_time)} | ${normalizeValue(row.product_type)} | ${normalizeValue(row.company)}`
-                    )
-                    .join("   ")}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="small-button primary"
-                onClick={handleSave}
-                disabled={!targetRows.length || saving}
-              >
-                {saving ? "Saving..." : "Save target rows"}
-              </button>
-            </div>
-          ) : null}
 
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>ID</th>
-                  <th>Plate</th>
+                  <th>#</th>
                   <th>Code</th>
                   <th>Date</th>
                   <th>Time</th>
@@ -444,22 +361,19 @@ function App() {
               </thead>
               <tbody>
                 {plateRows.length ? (
-                  plateRows.map((row, index) => {
-                    return (
-                      <tr key={row.id}>
-                        <td>{index + 1}</td>
-                        <td>{formatPlateLabel(row.license_plate)}</td>
-                        <td>{normalizeValue(row.arrival_code)}</td>
-                        <td>{normalizeValue(row.arrival_date)}</td>
-                        <td>{normalizeValue(row.batch_time)}</td>
-                        <td>{normalizeValue(row.product_type)}</td>
-                        <td>{normalizeValue(row.company)}</td>
-                      </tr>
-                    );
-                  })
+                  plateRows.map((row, index) => (
+                    <tr key={row.id}>
+                      <td>{index + 1}</td>
+                      <td>{normalizeValue(row.arrival_code)}</td>
+                      <td>{normalizeValue(row.arrival_date)}</td>
+                      <td>{normalizeValue(row.batch_time)}</td>
+                      <td>{normalizeValue(row.product_type)}</td>
+                      <td>{normalizeValue(row.company)}</td>
+                    </tr>
+                  ))
                 ) : (
                   <tr>
-                    <td colSpan="7" className="empty-cell">
+                    <td colSpan="6" className="empty-cell">
                       No saved rows for {selectedPlateLabel}.
                     </td>
                   </tr>
@@ -468,28 +382,29 @@ function App() {
             </table>
           </div>
         </section>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xlsx,.xls"
-          style={{ display: "none" }}
-          onChange={(event) => {
-            void handleFileSelected(event.target.files?.[0] || null);
-          }}
-        />
       </div>
 
+      {/* ── Hidden file input ── */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".xlsx,.xls"
+        style={{ display: "none" }}
+        onChange={(event) => void handleFileSelected(event.target.files?.[0] || null)}
+      />
+
+      {/* ── Desktop loading overlay ── */}
       {loading && !isMobile ? (
         <div className="status-overlay" aria-live="polite">
           <div className="status-card">
             <div className="spinner" />
             <strong>Finding target plates</strong>
-            <p>Reading the file and looking for the plates now.</p>
+            <p>Reading the file and scanning for matches.</p>
           </div>
         </div>
       ) : null}
 
+      {/* ── FABs ── */}
       <button
         type="button"
         className="floating-plus"
@@ -497,7 +412,7 @@ function App() {
         aria-label={isMobile ? "Open actions" : "Choose file"}
         title={isMobile ? "Open actions" : "Choose file"}
       >
-        {isMobile && mobileSheetOpen ? "x" : "+"}
+        {isMobile && mobileSheetOpen ? "✕" : "+"}
       </button>
 
       {isMobile && showTopButton ? (
@@ -508,18 +423,17 @@ function App() {
           aria-label="Scroll to top"
           title="Scroll to top"
         >
-          ^
+          ↑
         </button>
       ) : null}
 
+      {/* ── Mobile sheet ── */}
       {isMobile && mobileSheetOpen ? (
         <div className="mobile-sheet-backdrop" onClick={closeMobileSheet} role="presentation">
           <div className="mobile-sheet" onClick={(event) => event.stopPropagation()}>
             <div className="mobile-sheet-head">
               <strong>Truck Tracker</strong>
-              <button type="button" className="sheet-close" onClick={closeMobileSheet} aria-label="Close actions">
-                x
-              </button>
+              <button type="button" className="sheet-close" onClick={closeMobileSheet} aria-label="Close actions">✕</button>
             </div>
 
             <div className={`sheet-status ${mobileStatus}`}>
@@ -531,10 +445,9 @@ function App() {
                 </>
               ) : mobileStatus === "found" ? (
                 <>
+                  <div className="sheet-state-icon found-icon">✓</div>
                   <strong>{targetRows.length} match{targetRows.length === 1 ? "" : "es"} found</strong>
-                  <p>
-                    These are the exact rows that matched the target plates in the file.
-                  </p>
+                  <p>These are the exact rows that matched the target plates.</p>
                   <div className="sheet-preview">
                     {targetRows.map((row, index) => (
                       <div
@@ -546,30 +459,11 @@ function App() {
                           <span>Match {index + 1}</span>
                         </div>
                         <div className="sheet-preview-meta">
-                          <div>
-                            <b>Plate</b>
-                            <span>{normalizeValue(row.license_plate)}</span>
-                          </div>
-                          <div>
-                            <b>Code</b>
-                            <span>{normalizeValue(row.arrival_code)}</span>
-                          </div>
-                          <div>
-                            <b>Date</b>
-                            <span>{normalizeValue(row.arrival_date)}</span>
-                          </div>
-                          <div>
-                            <b>Time</b>
-                            <span>{normalizeValue(row.batch_time)}</span>
-                          </div>
-                          <div>
-                            <b>Product</b>
-                            <span>{normalizeValue(row.product_type)}</span>
-                          </div>
-                          <div>
-                            <b>Company</b>
-                            <span>{normalizeValue(row.company)}</span>
-                          </div>
+                          <div><b>Code</b><span>{normalizeValue(row.arrival_code)}</span></div>
+                          <div><b>Date</b><span>{normalizeValue(row.arrival_date)}</span></div>
+                          <div><b>Time</b><span>{normalizeValue(row.batch_time)}</span></div>
+                          <div><b>Product</b><span>{normalizeValue(row.product_type)}</span></div>
+                          <div><b>Company</b><span>{normalizeValue(row.company)}</span></div>
                         </div>
                       </div>
                     ))}
@@ -577,13 +471,15 @@ function App() {
                 </>
               ) : mobileStatus === "saved" ? (
                 <>
-                  <strong>Saved</strong>
+                  <div className="sheet-state-icon found-icon">✓</div>
+                  <strong>Saved successfully</strong>
                   <p>The target rows were written to the database.</p>
                 </>
               ) : mobileStatus === "not_found" ? (
                 <>
-                  <strong>Not found</strong>
-                  <p>No target plates were found in the selected file.</p>
+                  <div className="sheet-state-icon not-found-icon">✕</div>
+                  <strong>No matches found</strong>
+                  <p>The target plates were not present in this file.</p>
                 </>
               ) : (
                 <>
@@ -600,11 +496,11 @@ function App() {
             {mobileStatus === "found" ? (
               <button
                 type="button"
-                className="sheet-action primary"
+                className="sheet-action green"
                 onClick={handleSave}
                 disabled={!targetRows.length || saving}
               >
-                {saving ? "Saving..." : "Save target rows"}
+                {saving ? "Saving…" : "Save target rows"}
               </button>
             ) : null}
 
