@@ -58,7 +58,9 @@ export default async function handler(req, res) {
       }
     }
 
-    if (!targetRows.length) return res.status(200).json({ message: "No target plates found", saved: 0 });
+    if (!targetRows.length) {
+      return res.status(200).json({ message: "No target plates found", saved: 0, plates: [] });
+    }
 
     const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`, {
       method: "POST",
@@ -66,77 +68,24 @@ export default async function handler(req, res) {
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
         "Content-Type": "application/json",
-        Prefer: "return=representation"
+        Prefer: "return=representation" // This forces Supabase to send back the saved rows!
       },
       body: JSON.stringify(targetRows)
     });
 
     if (!response.ok) return res.status(500).json({ error: "Failed to save to Supabase" });
-    return res.status(200).json({ message: "Saved", saved: targetRows.length });
+    
+    // Grab the exact rows that Supabase committed to the database
+    const savedData = await response.json();
+    
+    // Extract just the license plates that were successfully processed
+    const processedPlates = savedData.map(row => row.license_plate);
+
+    // 🚀 NEW: Return the list of plates so the app knows exactly what to look for!
+    return res.status(200).json({ 
+      message: "Saved", 
+      saved: targetRows.length,
+      plates: processedPlates 
+    });
   });
 }
-
-
-
-
-
-
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FILE: frontend/api/import.js
-// PURPOSE: Vercel serverless API function that receives an Excel file,
-//          parses it, finds rows matching the target license plates,
-//          and saves those rows to Supabase.
-//
-// ENDPOINT: POST https://truck-tracker-six.vercel.app/api/import
-//
-// HOW IT FITS INTO THE SYSTEM:
-//   1. User receives an Excel file in WhatsApp
-//   2. User taps Share -> Truck Tracker Import (iOS Shortcut)
-//   3. The Shortcut sends the file to this endpoint via HTTP POST
-//   4. This function parses the Excel, finds the target plates,
-//      and saves matching rows to the Supabase "truck_arrivals" table
-//   5. The Shortcut then opens the app at:
-//      https://truck-tracker-six.vercel.app/?from=shortcut
-//   6. The app detects "?from=shortcut" in the URL, waits 2 seconds,
-//      fetches the latest rows, highlights any row saved in the last
-//      1 minute, and shows a popup confirming what was saved
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// IOS SHORTCUT SETUP (step by step):
-//
-//   1. Open the Shortcuts app on iPhone
-//   2. Tap + to create a new shortcut
-//   3. Add action: "Get Contents of URL"
-//      - URL:    https://truck-tracker-six.vercel.app/api/import
-//      - Method: POST
-//      - Request Body: Form
-//      - Add field -> File
-//        Key:   file
-//        Value: Shortcut Input
-//   4. Add action: "Open URLs"
-//      - URL: https://truck-tracker-six.vercel.app/?from=shortcut
-//   5. Tap the shortcut name at the top -> Rename -> "Truck Tracker Import"
-//   6. Done. To use: open a file in WhatsApp -> Share -> Truck Tracker Import
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// TARGET LICENSE PLATES:
-//   - A33233/40337
-//   - A21457/37737
-//   To add or change plates, update the TARGET_LICENSE_PLATES array
-//   in both this file and frontend/src/App.js
-//
-// SUPABASE TABLE: truck_arrivals
-//   Columns: arrival_date, batch_time, license_plate,
-//            arrival_code, product_type, company, created_at
-//
-// DEPENDENCIES:
-//   - formidable  (parses the incoming multipart/form-data file upload)
-//   - xlsx        (reads and parses the Excel file)
-//
-// DEPLOYMENT:
-//   - Hosted on Vercel automatically alongside the React frontend
-//   - Any push to the main branch on GitHub triggers a new deployment
-//   - Root directory is set to "frontend" in the Vercel dashboard settings
-// ─────────────────────────────────────────────────────────────────────────────
