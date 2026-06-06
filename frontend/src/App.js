@@ -104,7 +104,10 @@ async function parseBatchFile(file) {
 
 function isRecentRow(row) {
   if (!row.created_at) return false;
-  return (new Date() - new Date(row.created_at)) < 60 * 1000;
+  const savedUtc = new Date(row.created_at).getTime();
+  const nowUtc = Date.now();
+  const diff = nowUtc - savedUtc;
+  return diff >= 0 && diff < 60 * 1000;
 }
 
 // Merge arrivals and subdividers into a single ordered list
@@ -236,7 +239,7 @@ function App() {
     let response;
     try {
       response = await fetch(
-        `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=id,paid,arrival_date,batch_time,license_plate,arrival_code,product_type,company,created_at&order=created_at.desc&limit=50`,
+       `${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=id,paid,arrival_date,batch_time,license_plate,arrival_code,product_type,company,created_at&order=arrival_date.desc,created_at.desc&limit=50`,
         { headers: supabaseHeaders() }
       );
     } catch { throw new Error("Could not reach Supabase."); }
