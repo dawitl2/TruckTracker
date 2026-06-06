@@ -9,6 +9,11 @@ const SUPABASE_KEY = "sb_publishable_kF30JdMpqmsM9VmXPZLYAw_i8V58YJJ";
 const SUPABASE_TABLE = "truck_arrivals";
 const SUBDIVIDERS_TABLE = "subdividers";
 
+const DRIVERS = [
+  { id: 1, name: "Ermiyas Atakilt", photo: "/driver1.png" },
+  { id: 2, name: "Dawit", photo: "/driver2.png" },
+];
+
 function supabaseHeaders(extra = {}) {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, ...extra };
 }
@@ -104,16 +109,17 @@ function isRecentRow(row) {
 
 // Merge arrivals and subdividers into a single ordered list
 function mergeRowsWithDividers(arrivals, dividers) {
-  const dividerByAnchor = new Map();
+  // Sort dividers by position if available
+  const sortedDividers = [...dividers].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 
-  dividers.forEach((divider) => {
+  const dividerByAnchor = new Map();
+  sortedDividers.forEach((divider) => {
     const anchorKey = [
       normalizePlate(divider.license_plate),
       normalizeValue(divider.positioned_above_code),
       normalizeValue(divider.positioned_above_date),
       normalizeValue(divider.positioned_above_time)
     ].join("|");
-
     dividerByAnchor.set(anchorKey, divider);
   });
 
@@ -162,17 +168,32 @@ function App() {
   const [manualSaving, setManualSaving] = useState(false);
   const [manualError, setManualError] = useState("");
 
-  // Context menu
+  // Context menu (rows)
   const [contextMenu, setContextMenu] = useState(null);
   const longPressTimer = useRef(null);
   const contextMenuRef = useRef(null);
 
-  // Confirm modal: { type: 'paid'|'delete', row }
+  // Divider context menu
+  const [dividerContextMenu, setDividerContextMenu] = useState(null);
+  const dividerLongPressTimer = useRef(null);
+  const dividerContextMenuRef = useRef(null);
+
+  // Divider rename modal
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameLabel, setRenameLabel] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+
+  // Divider drag-to-reorder state
+  const [draggingDividerId, setDraggingDividerId] = useState(null);
+  const [dragOverIndex, setDragOverIndex] = useState(null);
+  const dragDividerRef = useRef(null);
+
+  // Confirm modal: { type: 'paid'|'delete'|'deleteDivider', row }
   const [confirmModal, setConfirmModal] = useState(null);
   const [confirmLoading, setConfirmLoading] = useState(false);
 
   // Subdivide label input
-  const [subdivideTarget, setSubdivideTarget] = useState(null); // the row to subdivide above
+  const [subdivideTarget, setSubdivideTarget] = useState(null);
   const [subdivideLabel, setSubdivideLabel] = useState("");
   const [subdivideSaving, setSubdivideSaving] = useState(false);
 
@@ -235,10 +256,11 @@ function App() {
     highlightTimerRef.current = setTimeout(() => setHighlightedIds(new Set()), 5 * 60 * 1000);
   }, []);
 
-  // Close context menu on outside click
+  // Close context menus on outside click
   useEffect(() => {
     const handler = (e) => {
       if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) setContextMenu(null);
+      if (dividerContextMenuRef.current && !dividerContextMenuRef.current.contains(e.target)) setDividerContextMenu(null);
     };
     document.addEventListener("mousedown", handler);
     document.addEventListener("touchstart", handler);
@@ -463,7 +485,129 @@ function App() {
     finally { setSubdivideSaving(false); }
   };
 
-  // ── Context menu ──────────────────────────────────────────
+  // ── Divider rename ────────────────────────────────────────
+  const handleDividerRename = async () => {
+    if (!renameTarget || !renameLabel.trim()) return;
+    setRenameSaving(true);
+    try {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUBDIVIDERS_TABLE}?id=eq.${renameTarget.id}`, {
+        method: "PATCH",
+        headers: supabaseHeaders({ "Content-Type": "application/json", Prefer: "return=representation" }),
+        body: JSON.stringify({ label: renameLabel.trim() })
+      });
+      if (!response.ok) throw new Error("Failed to rename divider");
+      await loadSubdividers();
+      setRenameTarget(null); setRenameLabel("");
+    } catch (err) { setError(err.message); }
+    finally { setRenameSaving(false); }
+  };
+
+  // ── Divider drag-to-reorder ────────────────────────────────
+  // We reorder dividers in the mergedRows list by updating which arrival row they're anchored above.
+  // On drag end, we PATCH the subdivider's anchor fields to the new position.
+  const handleDividerDragStart = (e, dividerId) => {
+    setDraggingDividerId(dividerId);
+    dragDividerRef.current = dividerId;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", dividerId);
+    }
+  };
+
+  const handleDividerDragOver = (e, index) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    setDragOverIndex(index);
+  };
+
+  const handleDividerDrop = async (e, targetArrivalRow) => {
+    e.preventDefault();
+    const dividerId = dragDividerRef.current;
+    setDraggingDividerId(null);
+    setDragOverIndex(null);
+    dragDividerRef.current = null;
+
+    if (!dividerId || !targetArrivalRow) return;
+
+    // Update the divider's anchor to be above this arrival row
+    try {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUBDIVIDERS_TABLE}?id=eq.${dividerId}`, {
+        method: "PATCH",
+        headers: supabaseHeaders({ "Content-Type": "application/json", Prefer: "return=representation" }),
+        body: JSON.stringify({
+          license_plate: targetArrivalRow.license_plate,
+          positioned_above_code: targetArrivalRow.arrival_code,
+          positioned_above_date: targetArrivalRow.arrival_date,
+          positioned_above_time: targetArrivalRow.batch_time
+        })
+      });
+      if (!response.ok) throw new Error("Failed to move divider");
+      await loadSubdividers();
+    } catch (err) { setError(err.message); }
+  };
+
+  const handleDragEnd = () => {
+    setDraggingDividerId(null);
+    setDragOverIndex(null);
+    dragDividerRef.current = null;
+  };
+
+  // Touch-based drag for mobile dividers
+  const touchDragState = useRef({ active: false, dividerId: null, startY: 0, currentRowIndex: null });
+
+  const handleDividerTouchStart = (e, divider) => {
+    // Only activate after long-press (600ms) for drag mode
+    // Short tap opens context menu — handled separately
+    touchDragState.current = {
+      active: false,
+      dividerId: divider.id,
+      startY: e.touches[0].clientY,
+      currentRowIndex: null,
+      divider,
+    };
+  };
+
+  const handleDividerTouchMove = (e) => {
+    const state = touchDragState.current;
+    if (!state.dividerId) return;
+    const delta = Math.abs(e.touches[0].clientY - state.startY);
+    if (!state.active && delta > 10) {
+      state.active = true;
+      setDraggingDividerId(state.dividerId);
+    }
+    if (state.active) {
+      e.preventDefault();
+      // Find which row we're hovering over using elementFromPoint
+      const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+      const tr = el?.closest("tr[data-row-index]");
+      if (tr) {
+        const idx = parseInt(tr.dataset.rowIndex, 10);
+        if (!isNaN(idx)) setDragOverIndex(idx);
+      }
+    }
+  };
+
+  const handleDividerTouchEnd = async (e, mergedRowsList) => {
+    const state = touchDragState.current;
+    if (!state.active || !state.dividerId || dragOverIndex === null) {
+      touchDragState.current = { active: false, dividerId: null, startY: 0, currentRowIndex: null };
+      setDraggingDividerId(null);
+      setDragOverIndex(null);
+      return;
+    }
+
+    // Find the arrival row at dragOverIndex
+    const targetItem = mergedRowsList[dragOverIndex];
+    if (targetItem && targetItem.__type === "row") {
+      await handleDividerDrop({ preventDefault: () => {} }, targetItem);
+    }
+
+    touchDragState.current = { active: false, dividerId: null, startY: 0, currentRowIndex: null };
+    setDraggingDividerId(null);
+    setDragOverIndex(null);
+  };
+
+  // ── Row context menu ──────────────────────────────────────
   const openContextMenu = (e, row) => {
     e.preventDefault();
     const x = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
@@ -476,6 +620,23 @@ function App() {
   };
   const handleRowTouchEnd = () => { if (longPressTimer.current) clearTimeout(longPressTimer.current); };
 
+  // ── Divider context menu ──────────────────────────────────
+  const openDividerContextMenu = (e, divider) => {
+    e.preventDefault();
+    const x = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
+    const y = e.clientY ?? e.touches?.[0]?.clientY ?? 0;
+    setDividerContextMenu({ divider, x, y });
+  };
+
+  const handleDividerLongPressStart = (e, divider) => {
+    dividerLongPressTimer.current = setTimeout(() => {
+      openDividerContextMenu(e, divider);
+    }, 600);
+  };
+  const handleDividerLongPressEnd = () => {
+    if (dividerLongPressTimer.current) clearTimeout(dividerLongPressTimer.current);
+  };
+
   // ── Table data ────────────────────────────────────────────
   const visibleRows = savedRows.filter((row) => TARGET_LICENSE_PLATE_SET.has(normalizePlate(row.license_plate)));
   const plateRows = visibleRows.filter((row) => normalizePlate(row.license_plate) === normalizePlate(selectedPlate));
@@ -484,6 +645,10 @@ function App() {
 
   const scanState = !file ? null : loading ? "loading" : targetRows.length && !saveComplete ? "found" : saveComplete ? "saved" : file ? "not_found" : null;
   const mobileStatus = loading ? "loading" : saveComplete ? "saved" : targetRows.length ? "found" : file ? "not_found" : "idle";
+
+  // Driver for selected plate
+  const selectedPlateIndex = TARGET_LICENSE_PLATES.findIndex(p => normalizePlate(p) === normalizePlate(selectedPlate));
+  const currentDriver = DRIVERS[selectedPlateIndex] ?? DRIVERS[0];
 
   let rowIndex = 0;
 
@@ -615,7 +780,7 @@ function App() {
           </div>
         ) : null}
 
-        {/* ── Context menu ── */}
+        {/* ── Row context menu ── */}
         {contextMenu ? (
           <div className="ctx-backdrop" onClick={() => setContextMenu(null)} role="presentation">
             <div
@@ -644,6 +809,48 @@ function App() {
               </button>
               <div className="ctx-divider" />
               <button type="button" className="ctx-item muted" onClick={() => setContextMenu(null)}>Cancel</button>
+            </div>
+          </div>
+        ) : null}
+
+        {/* ── Divider context menu ── */}
+        {dividerContextMenu ? (
+          <div className="ctx-backdrop" onClick={() => setDividerContextMenu(null)} role="presentation">
+            <div
+              ref={dividerContextMenuRef}
+              className="ctx-menu"
+              style={!isMobile ? { top: Math.min(dividerContextMenu.y, window.innerHeight - 220), left: Math.min(dividerContextMenu.x, window.innerWidth - 210) } : {}}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ctx-row-label">
+                <span>{dividerContextMenu.divider.label}</span>
+                <span>Divider</span>
+              </div>
+              <div className="ctx-divider" />
+              <button type="button" className="ctx-item"
+                onClick={() => {
+                  setRenameTarget(dividerContextMenu.divider);
+                  setRenameLabel(dividerContextMenu.divider.label);
+                  setDividerContextMenu(null);
+                }}>
+                ✎ Rename
+              </button>
+              <button type="button" className="ctx-item"
+                onClick={() => {
+                  setDividerContextMenu(null);
+                  // Highlight the divider row to indicate drag mode is available
+                  setDraggingDividerId(dividerContextMenu.divider.id);
+                  setTimeout(() => setDraggingDividerId(null), 2500);
+                }}>
+                ↕ Move (drag the row)
+              </button>
+              <div className="ctx-divider" />
+              <button type="button" className="ctx-item danger"
+                onClick={() => { setConfirmModal({ type: "deleteDivider", row: dividerContextMenu.divider }); setDividerContextMenu(null); }}>
+                ✕ Delete divider
+              </button>
+              <div className="ctx-divider" />
+              <button type="button" className="ctx-item muted" onClick={() => setDividerContextMenu(null)}>Cancel</button>
             </div>
           </div>
         ) : null}
@@ -706,6 +913,33 @@ function App() {
                 <button type="button" className="edit-btn cancel" onClick={() => setSubdivideTarget(null)}>Cancel</button>
                 <button type="button" className="edit-btn save" onClick={handleSubdivideSubmit} disabled={subdivideSaving || !subdivideLabel.trim()}>
                   {subdivideSaving ? "Saving…" : "Add divider"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* ── Divider rename modal ── */}
+        {renameTarget ? (
+          <div className="edit-backdrop" onClick={() => setRenameTarget(null)} role="presentation">
+            <div className="edit-modal" style={{ maxWidth: 360 }} onClick={(e) => e.stopPropagation()}>
+              <div className="edit-modal-head">
+                <strong>Rename divider</strong>
+                <button type="button" className="modal-x-btn" onClick={() => setRenameTarget(null)}>✕</button>
+              </div>
+              <div className="edit-field">
+                <label htmlFor="rename-label">Divider label</label>
+                <input
+                  id="rename-label" type="text" placeholder="Enter new label"
+                  value={renameLabel}
+                  onChange={(e) => setRenameLabel(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <div className="edit-actions">
+                <button type="button" className="edit-btn cancel" onClick={() => setRenameTarget(null)}>Cancel</button>
+                <button type="button" className="edit-btn save" onClick={handleDividerRename} disabled={renameSaving || !renameLabel.trim()}>
+                  {renameSaving ? "Saving…" : "Save label"}
                 </button>
               </div>
             </div>
@@ -798,6 +1032,27 @@ function App() {
             ))}
           </div>
 
+          {/* ── Driver card ── */}
+          <div className="driver-card">
+            <div className="driver-photo-wrap">
+              <img
+                src={currentDriver.photo}
+                alt={`Driver ${currentDriver.id}`}
+                className="driver-photo"
+                onError={(e) => { e.currentTarget.style.display = "none"; e.currentTarget.nextSibling.style.display = "flex"; }}
+              />
+              <div className="driver-photo-fallback" style={{ display: "none" }}>
+                <span>{currentDriver.name.charAt(0)}</span>
+              </div>
+            </div>
+            <div className="driver-info">
+              <p className="driver-label">Addis Ababa, Bole_Total</p>
+              <p className="driver-name">{currentDriver.name}</p>
+              <p className="driver-plate">{formatPlateLabel(selectedPlate)}</p>
+            </div>
+            <div className="driver-badge">D{currentDriver.id}</div>
+          </div>
+
           <div className="table-wrap">
             <table>
               <thead>
@@ -807,17 +1062,39 @@ function App() {
                   <th>Code</th>
                   <th>Date</th>
                   <th>Time</th>
-                  <th className="th-hide-mobile">Product</th>
-                  <th className="th-hide-mobile">Company</th>
+                  <th>Product</th>
+                  <th>Company</th>
                 </tr>
               </thead>
               <tbody>
-                {mergedRows.length ? mergedRows.map((item) => {
+                {mergedRows.length ? mergedRows.map((item, mergedIdx) => {
                   if (item.__type === "divider") {
+                    const isDragging = draggingDividerId === item.id;
                     return (
-                      <tr key={`div-${item.id}`} className="divider-row">
-               <td colSpan="7" className="divider-cell">
+                      <tr
+                        key={`div-${item.id}`}
+                        className={`divider-row${isDragging ? " divider-dragging" : ""}`}
+                        data-row-index={mergedIdx}
+                        draggable
+                        onDragStart={(e) => handleDividerDragStart(e, item.id)}
+                        onDragEnd={handleDragEnd}
+                        onContextMenu={(e) => openDividerContextMenu(e, item)}
+                        onTouchStart={(e) => {
+                          handleDividerLongPressStart(e, item);
+                          handleDividerTouchStart(e, item);
+                        }}
+                        onTouchMove={(e) => {
+                          handleDividerLongPressEnd();
+                          handleDividerTouchMove(e);
+                        }}
+                        onTouchEnd={(e) => {
+                          handleDividerLongPressEnd();
+                          handleDividerTouchEnd(e, mergedRows);
+                        }}
+                      >
+                        <td colSpan="7" className="divider-cell">
                           <div className="divider-inner">
+                            <span className="divider-drag-handle" title="Drag to reorder">⠿</span>
                             <span className="divider-label">{item.label}</span>
                             <button
                               type="button"
@@ -831,14 +1108,22 @@ function App() {
                     );
                   }
                   const idx = rowIndex++;
+                  const isDropTarget = dragOverIndex === mergedIdx && draggingDividerId !== null;
                   return (
                     <tr
                       key={item.id}
-                      className={[highlightedIds.has(item.id) ? "row-highlight" : "", item.paid ? "row-paid" : ""].filter(Boolean).join(" ")}
+                      data-row-index={mergedIdx}
+                      className={[
+                        highlightedIds.has(item.id) ? "row-highlight" : "",
+                        item.paid ? "row-paid" : "",
+                        isDropTarget ? "drop-target" : ""
+                      ].filter(Boolean).join(" ")}
                       onContextMenu={(e) => openContextMenu(e, item)}
                       onTouchStart={(e) => handleRowTouchStart(e, item)}
                       onTouchEnd={handleRowTouchEnd}
                       onTouchMove={handleRowTouchEnd}
+                      onDragOver={(e) => handleDividerDragOver(e, mergedIdx)}
+                      onDrop={(e) => handleDividerDrop(e, item)}
                     >
                       <td className="td-num">{idx + 1}</td>
                       <td className="td-paid">
@@ -847,8 +1132,8 @@ function App() {
                       <td className="td-code">{normalizeValue(item.arrival_code)}</td>
                       <td className="td-date">{normalizeValue(item.arrival_date)}</td>
                       <td className="td-time">{normalizeValue(item.batch_time)}</td>
-                      <td className="th-hide-mobile">{normalizeValue(item.product_type)}</td>
-                      <td className="th-hide-mobile">{normalizeValue(item.company)}</td>
+                      <td>{normalizeValue(item.product_type)}</td>
+                      <td>{normalizeValue(item.company)}</td>
                     </tr>
                   );
                 }) : (
