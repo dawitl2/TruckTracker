@@ -102,14 +102,6 @@ async function parseBatchFile(file) {
   return parsed;
 }
 
-function isRecentRow(row) {
-  if (!row.created_at) return false;
-  const savedUtc = new Date(row.created_at).getTime();
-  const nowUtc = Date.now();
-  const diff = nowUtc - savedUtc;
-  return diff >= 0 && diff < 60 * 1000;
-}
-
 // Returns rows from `incoming` that already exist in `existing`
 function findDuplicates(incoming, existing) {
   return incoming.filter((newRow) =>
@@ -148,6 +140,25 @@ function mergeRowsWithDividers(arrivals, dividers) {
     merged.push({ __type: "row", ...row });
   });
   return merged;
+}
+
+// Parse the shortcut rows directly from URL params — no DB roundtrip needed.
+// The API now sends everything required to show the popup instantly.
+function parseShortcutRows(params) {
+  const ids = (params.get("ids") || "").split(",").filter(Boolean);
+  const plates = (params.get("plates") || "").split(",").filter(Boolean).map(decodeURIComponent);
+  const codes = (params.get("codes") || "").split(",").filter(Boolean).map(decodeURIComponent);
+  const dates = (params.get("dates") || "").split(",").filter(Boolean).map(decodeURIComponent);
+  const times = (params.get("times") || "").split(",").filter(Boolean).map(decodeURIComponent);
+
+  // Reconstruct row objects from URL data
+  return ids.map((id, i) => ({
+    id: id,
+    license_plate: plates[i] || "",
+    arrival_code: codes[i] || "",
+    arrival_date: dates[i] || "",
+    batch_time: times[i] || "",
+  })).filter((r) => r.license_plate && r.arrival_code);
 }
 
 function App() {
@@ -262,49 +273,57 @@ function App() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("from") === "shortcut") {
+    const fromShortcut = params.get("from") === "shortcut";
+
+    // Always clean the URL immediately so a page refresh doesn't re-trigger
+    if (fromShortcut) {
       window.history.replaceState({}, "", window.location.pathname);
-      const savedIds = (params.get("ids") || "").split(",").map(s => s.trim()).filter(Boolean);
+    }
 
-      const checkForRows = async (attemptsLeft) => {
-        try {
-          const rows = await loadSavedRows();
-          await loadSubdividers();
+    if (fromShortcut) {
+      const status = params.get("status"); // "saved" | "not_found" | "error"
 
-          let recentRows = [];
+      if (status === "saved") {
+        // INSTANT popup — built directly from URL params, zero DB wait
+        const rows = parseShortcutRows(params);
 
-          if (savedIds.length > 0) {
-            // Best case: match by exact IDs passed in the URL
-            const idSet = new Set(savedIds.map(Number));
-            recentRows = rows.filter((row) =>
-              TARGET_LICENSE_PLATE_SET.has(normalizePlate(row.license_plate)) && idSet.has(row.id)
-            );
-          }
+        if (rows.length > 0) {
+          // Show popup immediately with whatever plate was first saved
+          setSelectedPlate(rows[0].license_plate || TARGET_LICENSE_PLATES[0]);
+          setShortcutPopup({ status: "saved", rows });
 
-          if (recentRows.length === 0) {
-            // Fallback: use time window (covers cases where IDs weren't passed)
-            recentRows = rows.filter((row) =>
-              TARGET_LICENSE_PLATE_SET.has(normalizePlate(row.license_plate)) && isRecentRow(row)
-            );
-          }
+          // Highlight those IDs once the table loads (fire-and-forget)
+          const idSet = new Set(rows.map((r) => String(r.id)));
+          startHighlightTimer(idSet);
+        } else {
+          // IDs came through but rows array is empty — show not_found
+          setShortcutPopup({ status: "not_found", rows: [] });
+        }
+      } else if (status === "not_found") {
+        setShortcutPopup({ status: "not_found", rows: [] });
+      } else {
+        // "error" or anything unexpected
+        setShortcutPopup({ status: "not_found", rows: [] });
+      }
 
-          if (recentRows.length > 0) {
-            setSelectedPlate(recentRows[0].license_plate);
-            startHighlightTimer(new Set(recentRows.map((r) => r.id)));
-            setShortcutPopup({ status: "saved", rows: recentRows });
-          } else if (attemptsLeft > 0) {
-            setTimeout(() => checkForRows(attemptsLeft - 1), 2000);
-          } else {
-            setShortcutPopup({ status: "not_found", rows: [] });
-          }
-        } catch { setShortcutPopup({ status: "not_found", rows: [] }); }
-      };
-      setTimeout(() => checkForRows(13), 1000);
+      // Load table in background — completely independent of popup display
+      loadAll().catch((err) => setError(err.message));
     } else {
+      // Normal page load
       loadAll().catch((err) => setError(err.message));
     }
+
     return () => { if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current); };
-  }, [loadAll, loadSavedRows, loadSubdividers, startHighlightTimer]);
+  }, [loadAll, startHighlightTimer]);
+
+  // After table loads, update highlights so they work even if IDs changed type
+  // (string vs number doesn't matter — we store as strings now)
+  const prevHighlightRef = useRef(null);
+  useEffect(() => {
+    if (highlightedIds.size === 0) return;
+    // highlightedIds are already strings; row.id from Supabase may be number — normalise
+    prevHighlightRef.current = highlightedIds;
+  }, [highlightedIds]);
 
   useEffect(() => {
     const updateViewport = () => setIsMobile(window.innerWidth <= 720);
@@ -368,12 +387,12 @@ function App() {
       }));
 
       // Duplicate check
- const dupes = findDuplicates(payload, savedRows);
+      const dupes = findDuplicates(payload, savedRows);
       if (dupes.length) {
         setError(`duplicate:${dupes.map(d => `${d.arrival_code} · ${d.arrival_date}`).join(", ")}`);
         setSaving(false);
         setSaveComplete(false);
-        setTargetRows(targetRows); // keep the found state so the panel stays open
+        setTargetRows(targetRows);
         return;
       }
 
@@ -398,7 +417,6 @@ function App() {
     }
     setManualSaving(true); setManualError("");
     try {
-      // Duplicate check for manual entry
       const dupeCheck = findDuplicates([{
         license_plate: manualFields.license_plate.trim(),
         arrival_code: manualFields.arrival_code.trim(),
@@ -631,6 +649,9 @@ function App() {
 
   const isDuplicateError = error.startsWith("duplicate:");
   const errorDisplay = isDuplicateError ? `⚠ Already in table: ${error.replace("duplicate:", "")}` : error;
+
+  // Highlight comparison: normalize both sides to strings
+  const isHighlighted = (rowId) => highlightedIds.has(String(rowId));
 
   let rowIndex = 0;
 
@@ -1034,7 +1055,7 @@ function App() {
                   const isDropTarget = dragOverIndex === mergedIdx && draggingDividerId !== null;
                   return (
                     <tr key={item.id} data-row-index={mergedIdx}
-                      className={[highlightedIds.has(item.id) ? "row-highlight" : "", item.paid ? "row-paid" : "", isDropTarget ? "drop-target" : ""].filter(Boolean).join(" ")}
+                      className={[isHighlighted(item.id) ? "row-highlight" : "", item.paid ? "row-paid" : "", isDropTarget ? "drop-target" : ""].filter(Boolean).join(" ")}
                       onContextMenu={(e) => openContextMenu(e, item)}
                       onTouchStart={(e) => handleRowTouchStart(e, item)}
                       onTouchEnd={handleRowTouchEnd}
@@ -1113,7 +1134,7 @@ function App() {
                 ) : mobileStatus === "saved" ? (<><div className="sheet-state-icon found-icon">✓</div><strong>Saved successfully</strong></>)
                   : (<><div className="sheet-state-icon not-found-icon">✕</div><strong>No matches found</strong></>)}
             </div>
-           {error && error.startsWith("duplicate:") ? (
+            {error && error.startsWith("duplicate:") ? (
               <div className="sheet-dupe-warning">
                 ⚠ Already in table: {error.replace("duplicate:", "")}
               </div>
