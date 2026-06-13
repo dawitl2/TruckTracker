@@ -7,7 +7,7 @@ const SUPABASE_KEY = "sb_publishable_kF30JdMpqmsM9VmXPZLYAw_i8V58YJJ";
 const SUPABASE_TABLE = "truck_arrivals";
 
 function normalizePlate(value) {
-  return String(value || "").trim().toUpperCase();
+  return String(value || "").trim().replace(/\s+/g, "").toUpperCase();
 }
 
 function formatDate(date) {
@@ -18,6 +18,118 @@ function formatTime(date) {
   return new Intl.DateTimeFormat("en-GB", {
     hour: "2-digit", minute: "2-digit", hour12: false,
   }).format(date);
+}
+
+const TARGET_LICENSE_PLATE_SET = new Set(TARGET_LICENSE_PLATES.map(normalizePlate));
+
+function cleanCell(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function isDateLike(value) {
+  const text = cleanCell(value);
+  return /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(text) || /^\d{4}[./-]\d{1,2}[./-]\d{1,2}$/.test(text);
+}
+
+function toIsoDate(value) {
+  const text = cleanCell(value);
+  const match = text.match(/^(\d{1,4})[./-](\d{1,2})[./-](\d{1,4})$/);
+  if (!match) return "";
+
+  let [, first, second, third] = match;
+  let year;
+  let month;
+  let day;
+
+  if (first.length === 4) {
+    year = first;
+    month = second;
+    day = third;
+  } else {
+    day = first;
+    month = second;
+    year = third.length === 2 ? `20${third}` : third;
+  }
+
+  return `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+function isTimeLike(value) {
+  return /^\d{1,2}:\d{2}(:\d{2})?$/.test(cleanCell(value));
+}
+
+function isPlateLike(value) {
+  const plate = normalizePlate(value);
+  return TARGET_LICENSE_PLATE_SET.has(plate) || /^[A-Z]?\d{4,6}\/\d{4,6}$/.test(plate);
+}
+
+function isArrivalCodeLike(value) {
+  const text = cleanCell(value);
+  if (!text || isDateLike(text) || isTimeLike(text) || isPlateLike(text)) return false;
+  if (/^\d{4,7}$/.test(text)) return true;
+  return /^[A-Z0-9-]{4,12}$/i.test(text) && /\d/.test(text);
+}
+
+function looksLikeProduct(value) {
+  return /^(AGO|MGR|PMS|JET|DPK|LPG|KEROSENE|DIESEL|GASOIL|GASOLINE)$/i.test(cleanCell(value));
+}
+
+function looksLikeCompany(value) {
+  const text = cleanCell(value);
+  if (!text || isDateLike(text) || isTimeLike(text) || isPlateLike(text) || isArrivalCodeLike(text) || looksLikeProduct(text)) return false;
+  return /[A-Z]/i.test(text);
+}
+
+function pickNearbyCell(cells, startIndex, predicate, usedIndexes) {
+  const indexes = cells.map((_, index) => index)
+    .filter((index) => index !== startIndex && !usedIndexes.has(index))
+    .sort((a, b) => Math.abs(a - startIndex) - Math.abs(b - startIndex) || a - b);
+
+  return indexes.find((index) => predicate(cells[index]));
+}
+
+function pickArrivalCodeCell(cells, plateIndex, usedIndexes) {
+  const rightSideCode = cells.findIndex((cell, index) =>
+    index > plateIndex && !usedIndexes.has(index) && isArrivalCodeLike(cell)
+  );
+
+  return rightSideCode >= 0
+    ? rightSideCode
+    : pickNearbyCell(cells, plateIndex, isArrivalCodeLike, usedIndexes);
+}
+
+function parseArrivalRow(row, arrivalDate, batchTime) {
+  const cells = (Array.isArray(row) ? row : []).map(cleanCell);
+  if (!cells.some(Boolean)) return null;
+
+  const targetIndex = cells.findIndex((cell) => TARGET_LICENSE_PLATE_SET.has(normalizePlate(cell)));
+  const plateIndex = targetIndex >= 0 ? targetIndex : cells.findIndex(isPlateLike);
+  if (plateIndex < 0) return null;
+
+  const usedIndexes = new Set([plateIndex]);
+  const codeIndex = pickArrivalCodeCell(cells, plateIndex, usedIndexes);
+  if (codeIndex === undefined) return null;
+  usedIndexes.add(codeIndex);
+
+  const dateIndex = pickNearbyCell(cells, plateIndex, isDateLike, usedIndexes);
+  if (dateIndex !== undefined) usedIndexes.add(dateIndex);
+
+  const timeIndex = pickNearbyCell(cells, plateIndex, isTimeLike, usedIndexes);
+  if (timeIndex !== undefined) usedIndexes.add(timeIndex);
+
+  const productIndex = pickNearbyCell(cells, plateIndex, looksLikeProduct, usedIndexes);
+  if (productIndex !== undefined) usedIndexes.add(productIndex);
+
+  const companyIndex = pickNearbyCell(cells, plateIndex, looksLikeCompany, usedIndexes);
+
+  return {
+    arrival_date: dateIndex !== undefined ? toIsoDate(cells[dateIndex]) || arrivalDate : arrivalDate,
+    batch_time: timeIndex !== undefined ? cells[timeIndex].slice(0, 5) : batchTime,
+    license_plate: cells[plateIndex],
+    arrival_code: cells[codeIndex],
+    product_type: productIndex !== undefined ? cells[productIndex] : null,
+    company: companyIndex !== undefined ? cells[companyIndex] : null,
+  };
 }
 
 // Wrap formidable's callback-based parse in a Promise so we can properly await it.
@@ -62,29 +174,15 @@ export default async function handler(req, res) {
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
 
   const now = new Date();
   const arrival_date = formatDate(now);
   const batch_time = formatTime(now);
 
-  const targetRows = [];
-  for (const row of matrix) {
-    const serial = String(row[0] || "").trim();
-    const plate = String(row[1] || "").trim();
-    const code = String(row[2] || "").trim();
-    if (!/^\d+$/.test(serial) || !plate || !code) continue;
-    if (TARGET_LICENSE_PLATES.some((t) => normalizePlate(t) === normalizePlate(plate))) {
-      targetRows.push({
-        arrival_date,
-        batch_time,
-        license_plate: plate,
-        arrival_code: code,
-        product_type: String(row[3] || "").trim() || null,
-        company: String(row[4] || "").trim() || null,
-      });
-    }
-  }
+  const targetRows = matrix
+    .map((row) => parseArrivalRow(row, arrival_date, batch_time))
+    .filter((row) => row && TARGET_LICENSE_PLATE_SET.has(normalizePlate(row.license_plate)));
 
   if (!targetRows.length) {
     return res.redirect(302, "/?from=shortcut&status=not_found");
